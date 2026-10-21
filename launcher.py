@@ -92,13 +92,13 @@ def main():
         return
     if args.install:install_startup();migrate_history(data)
     start(data)
-    if args.start:return
     info=server_info(data)
     if not info:
         spawn('--serve')
         for _ in range(40):
             time.sleep(.2);info=server_info(data)
             if info:break
+    if args.start:return
     if info:
         edge=Path(os.environ.get('PROGRAMFILES(X86)',r'C:\Program Files (x86)'))/'Microsoft/Edge/Application/msedge.exe'
         url=f"http://127.0.0.1:{info['port']}/#{info['token']}"

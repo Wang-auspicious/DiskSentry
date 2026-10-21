@@ -53,7 +53,7 @@ class Collector:
         self.data=Path(data or data_dir());initialize(self.data);self.c=connect(self.data)
         self.stop=threading.Event();self.pending=Pending(self.data);self.observers={};self.scan_messages=queue.Queue(12)
         self.roots=watch_roots or roots();self.last_resources=0;self.last_folders=0;self.revision=0;self.thread=None
-        self.state=dict(pid=os.getpid(),phase='starting',roots=self.roots,heartbeat=time.time(),indexed=meta(self.c,'indexed',0),scanned=0,skipped=0,errors=[],coverage_complete=False)
+        self.state=dict(pid=os.getpid(),phase='starting',roots=self.roots,heartbeat=time.time(),indexed=meta(self.c,'indexed',0),scanned=0,skipped=0,errors=[],coverage_complete=all(meta(self.c,'baseline:'+r,False) for r in self.roots))
 
     def resource_sample(self,now=None):
         now=now or time.time()
@@ -74,7 +74,9 @@ class Collector:
                 task=c.execute('SELECT * FROM scan_queue ORDER BY priority DESC LIMIT 1').fetchone()
                 if not task:break
                 directory=task['p'];root=task['root'];baseline=not meta(c,'baseline:'+root,False)
-                rows=[];children=[];candidates={};total=0;count=0
+                if psutil.disk_usage(self.data).free<5_000_000_000:
+                    self.state['phase']='index_paused_low_space';self.state['errors']=['索引所在磁盘不足 5 GB；已暂停全盘索引，保留实时监听。'];self.stop.wait(15);continue
+                rows=[];children=[];candidates={};total=0;count=0;observed_names=set()
                 try:
                     with os.scandir(directory) as entries:
                         for entry in entries:
@@ -88,7 +90,7 @@ class Collector:
                                     if any(x in entry.path.lower() for x in ('windows','node_modules','site-packages')):priority=0
                                     children.append((entry.path,root,priority))
                                 elif entry.is_file(follow_symlinks=False):
-                                    n=s.st_size;rows.append((entry.path,n,s.st_mtime));total+=n;count+=1
+                                    n=s.st_size;rows.append((entry.path,n,s.st_mtime));total+=n;count+=1;observed_names.add(entry.name.casefold())
                                     rule=classify(entry.path,s.st_mtime)
                                     if rule['bucket']:
                                         bucket=rule['bucket'];v=candidates.setdefault(bucket,[0,0,rule]);v[0]+=n;v[1]+=1
@@ -96,7 +98,7 @@ class Collector:
                                         self.put(('files',rows,baseline));rows=[];time.sleep(.01)
                             except OSError:self.state['skipped']+=1
                     if rows:self.put(('files',rows,baseline))
-                    self.put(('directory',directory,root,children,total,count,candidates))
+                    self.put(('directory',directory,root,children,total,count,candidates,observed_names,baseline))
                     # Writer acknowledges by deleting queue row. Keeps current directory replayable on crash.
                     while not self.stop.is_set() and c.execute('SELECT 1 FROM scan_queue WHERE p=?',(directory,)).fetchone():time.sleep(.05)
                 except OSError as e:
@@ -126,8 +128,16 @@ class Collector:
             for p,n,m in msg[1]:observe(self.c,p,n,m,source='reconcile',baseline=msg[2])
             self.state['scanned']+=len(msg[1])
         elif msg[0]=='directory':
-            _,directory,root,children,n,count,candidates=msg
+            _,directory,root,children,n,count,candidates,observed_names,baseline=msg
             old=self.c.execute('SELECT n,files FROM scan_dirs WHERE p=?',(directory,)).fetchone()
+            if old and not baseline:
+                prefix=directory.rstrip('\\/')+os.sep
+                for row in self.c.execute('SELECT p FROM files WHERE p>=? COLLATE NOCASE AND p<? COLLATE NOCASE',(prefix,prefix+'\U0010ffff')).fetchall():
+                    if os.path.dirname(row['p']).casefold()==directory.casefold() and os.path.basename(row['p']).casefold() not in observed_names:
+                        try:os.stat(row['p'])
+                        except FileNotFoundError:
+                            removed(self.c,row['p']);self.c.execute("UPDATE events SET source='offline-reconcile' WHERE id=last_insert_rowid()")
+                        except OSError:pass
             rollup(self.c,directory,n-(old['n'] if old else 0),count-(old['files'] if old else 0))
             self.c.execute('INSERT OR REPLACE INTO scan_dirs VALUES (?,?,?,?)',(directory,n,count,str(time.time())))
             self.c.execute('DELETE FROM candidate_parts WHERE dir=?',(directory,))

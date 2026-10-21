@@ -67,6 +67,7 @@ def worker(data,stop):
                 enabled=meta(c,'ai_enabled',True)
                 job=c.execute("SELECT * FROM ai_jobs WHERE status IN ('manual','pending') AND requested<? ORDER BY CASE status WHEN 'manual' THEN 0 ELSE 1 END,requested DESC LIMIT 1",(time.time()-10,)).fetchone()
                 if not cfg['key'] or not enabled or not job:stop.wait(5);continue
+                if job['status']=='pending' and not meta(c,'status',{}).get('coverage_complete',False):stop.wait(5);continue
                 # A snapshot's jobs are never generated; only observed events or explicit requests.
                 try:
                     c.execute("UPDATE ai_jobs SET status='running',error=NULL WHERE p=?",(job['p'],));c.commit()
