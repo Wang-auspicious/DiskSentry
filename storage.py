@@ -42,9 +42,11 @@ def initialize(data=None):
 def rollup(c,directory,delta,count=0):
     for _ in range(40):
         parent=os.path.dirname(directory)
+        terminal=parent==directory or not directory
+        if terminal:parent=''
         c.execute('INSERT INTO folders VALUES (?,?,?,?,?) ON CONFLICT(p) DO UPDATE SET n=max(0,n+?),files=max(0,files+?),updated=excluded.updated',
             (directory,parent,max(0,delta),max(0,count),time.time(),delta,count))
-        if parent==directory or not directory:break
+        if terminal:break
         directory=parent
 
 def meta(c,k,default=None):
