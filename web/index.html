@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>磁盘哨兵 · 资源透视</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Metrics Overview Card -->
+    <header class="stats" aria-label="磁盘概况">
+      <!-- Stat 1: Free after cleanup -->
+      <div class="stat">
+        <div class="stat-caption">清理后可用空间</div>
+        <div class="stat-line">
+          <strong id="free-after">—</strong>
+          <span id="free-diff" class="stat-diff">+0.0 GB</span>
+        </div>
+      </div>
+      <!-- Stat 2: Safe to remove -->
+      <div class="stat">
+        <div class="stat-caption"><i class="dot green"></i>安全清理</div>
+        <div class="stat-line">
+          <strong id="safe-size">—</strong>
+          <span id="safe-count" class="stat-count">0 项</span>
+        </div>
+      </div>
+      <!-- Stat 3: Needs review -->
+      <div class="stat">
+        <div class="stat-caption"><i class="dot amber"></i>建议核对</div>
+        <div class="stat-line">
+          <strong id="review-size">—</strong>
+          <span id="review-count" class="stat-count">0 项</span>
+        </div>
+      </div>
+      <!-- Stat 4: Not scanned -->
+      <div class="stat">
+        <div class="stat-caption">未扫描</div>
+        <div class="stat-line">
+          <strong id="not-scanned-size">—</strong>
+          <span class="stat-count">系统与应用</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+      <!-- Left Panel: Explorer (资源透视) -->
+      <section class="panel explorer" aria-label="资源透视地图">
+        <div class="panel-heading">
+          <div>
+            <h1>资源透视</h1>
+            <p>按空间占用大小展示目录。点击方块可打开定位。</p>
+          </div>
+          <div class="header-controls">
+            <div class="segmented" aria-label="展示维度">
+              <button class="active" id="btn-cat" aria-pressed="true">分类</button>
+              <button id="btn-clean" aria-pressed="false">清理</button>
+            </div>
+            <button id="btn-refresh" class="icon-tool-btn" title="刷新磁盘信息" aria-label="刷新">↻</button>
+            <button id="btn-settings" class="icon-tool-btn" title="监控与设置" aria-label="设置">⚙</button>
+          </div>
+        </div>
+
+        <div class="map-toolbar">
+          <nav id="breadcrumbs" aria-label="当前路径">
+            <button class="crumb-btn active" id="crumb-root">~ 主目录</button>
+          </nav>
+          <div class="map-total">
+            <strong id="map-total-size">—</strong>
+          </div>
+        </div>
+
+        <div id="treemap" class="treemap" aria-label="文件空间树图">
+          <div class="map-empty">
+            <div class="empty-spinner">▤</div>
+            <strong>正在加载磁盘地图…</strong>
+            <p>已索引的文件与目录正在汇总计算中</p>
+          </div>
+        </div>
+
+        <div class="legend" id="legend">
+          <span><i style="--color:#ea580c"></i>文档与媒体</span>
+          <span><i style="--color:#64748b"></i>开发工具与其它</span>
+          <span><i style="--color:#8b5cf6"></i>代码工程</span>
+          <span><i style="--color:#06b6d4"></i>移动开发 SDK</span>
+          <span><i style="--color:#ec4899"></i>AI 模型</span>
+          <span><i class="stripe"></i>包管理器缓存</span>
+        </div>
+      </section>
+
+      <!-- Right Panel: Recommendations (清理建议) -->
+      <aside class="panel recommendations" aria-label="清理建议列表">
+        <div class="panel-heading">
+          <div>
+            <h2>清理建议</h2>
+            <p>选择项目生成清理脚本</p>
+          </div>
+        </div>
+
+        <div class="recommendations-scroll" id="recommendations-container">
+          <!-- Section 1: Safe to remove -->
+          <div class="rec-section" id="section-safe">
+            <div class="rec-section-header">
+              <span class="pill-badge green">安全清理</span>
+              <span class="rec-section-size" id="safe-section-total">—</span>
+            </div>
+            <div class="rec-list" id="safe-items-list"></div>
+          </div>
+
+          <!-- Section 2: Review first -->
+          <div class="rec-section" id="section-review">
+            <div class="rec-section-header">
+              <span class="pill-badge amber">建议核对</span>
+              <span class="rec-section-size" id="review-section-total">—</span>
+            </div>
+            <div class="rec-list" id="review-items-list"></div>
+          </div>
+        </div>
+
+        <!-- Recommendations Footer -->
+        <div class="recommendations-footer">
+          <div class="footer-summary">
+            <span id="selected-summary">已选 0 B · 0 项</span>
+          </div>
+          <div class="footer-actions">
+            <button id="btn-select-safe" class="pill-btn light">全选安全项</button>
+            <button id="btn-copy-script" class="pill-btn dark">复制清理脚本</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Settings Dialog -->
+  <dialog id="settings-dialog">
+    <div class="dialog-heading">
+      <div>
+        <h2>监控与设置</h2>
+        <p>关闭窗口后，后台保持持续记录与统计。</p>
+      </div>
+      <button id="close-settings" class="dialog-close-btn" aria-label="关闭">×</button>
+    </div>
+    <div class="setting-row">
+      <div>
+        <strong>后台监控服务</strong>
+        <small id="settings-health">正在读取监控状态</small>
+      </div>
+      <button id="toggle-monitor" class="pill-btn light">停止监控</button>
+    </div>
+    <div class="setting-row">
+      <div>
+        <strong>登录 Windows 后自动运行</strong>
+        <small>仅为当前登录用户启用开机自启</small>
+      </div>
+      <input type="checkbox" id="autostart" aria-label="登录后自动监控" class="switch">
+    </div>
+    <div class="setting-row">
+      <div>
+        <strong>重新补扫全部驱动器</strong>
+        <small>快速重新索引 100 MB 以上大文件与系统缓存</small>
+      </div>
+      <button id="rescan" class="pill-btn light">立即补扫</button>
+    </div>
+    <div class="info-note">
+      <strong>关于清理与安全</strong>
+      <p>磁盘哨兵仅提供直观透视与可审核的清理脚本，不会擅自删除您的任何个人文件。所有清理操作完全透明，由您在 PowerShell 中确认后自主执行。</p>
+    </div>
+    <div class="dialog-footer">
+      <span>磁盘哨兵 · 本地 SQLite 持续记录</span>
+      <button id="overview" class="pill-btn light">打开 WinDirStat ↗</button>
+    </div>
+  </dialog>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast" role="status"></div>
+</body>
+</html>

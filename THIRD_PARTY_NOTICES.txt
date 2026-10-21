@@ -1,0 +1,24 @@
+DiskWatch original source: MIT License (LICENSE.txt).
+
+Watchdog 6.0.0
+Project: https://github.com/gorakhargosh/watchdog
+License: Apache License 2.0, preserved in vendor/LICENSE.
+Source is included in vendor/watchdog, copied from the already installed 6.0.0 distribution.
+Runtime notification flags exclude access-time, security and attribute-only events; the vendored source is unchanged.
+
+WinDirStat 2.9.3, official x64 portable executable
+Project: https://github.com/windirstat/windirstat
+Release: https://github.com/windirstat/windirstat/releases/tag/release/v2.9.3
+Corresponding source: https://github.com/windirstat/windirstat/tree/release/v2.9.3
+Source archive: https://github.com/windirstat/windirstat/archive/refs/tags/release/v2.9.3.zip
+License: GPL v3 or later. Included license: tools/WinDirStat-LICENSE.md.
+WinDirStat is a separate, unmodified program, optionally opened from DiskWatch.
+Official WinDirStat.zip SHA-256 verified against the GitHub release asset digest:
+c980fee14389eb3a160415b0a07361900f3630f232501884863fec40f369a4a4
+The included x64 executable's Authenticode signature was valid at installation,
+signed by Open Source Developer Bryan Berns.
+
+Other evaluated projects
+Delta: https://github.com/chuunibian/delta — MIT; manual snapshot scans, no autonomous background monitoring.
+DiskTracker: https://github.com/pratham15541/disktracker — MIT; daemon/CLI available, no current graphical desktop client.
+DiskMap: https://github.com/aldo-mcs/DiskMap — repository license states proprietary / all rights reserved; not reused.

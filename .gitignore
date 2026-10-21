@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+work/
+data/
+*.sqlite*
+*.db*
+*.lnk
+*.log
+dashboard.json
+settings.local.json
+.env*
+*auth*.json
+*secret*
+screenshots/
