@@ -144,6 +144,25 @@ class CoreTests(unittest.TestCase):
   with patch.object(INDEX,'match',return_value=evidence):preserve_attribution(self.data)
   with patch.object(INDEX,'match',return_value={'agent':'unknown'}):
    d=state(self.data,{});self.assertEqual(d['events'][0]['attribution']['session'],'old-session')
+ def test_leaf_folder_map_shows_files(self):
+  p=str(self.root/'large.bin');observe(self.c,p,123,1,baseline=True);rollup(self.c,str(self.root),123,1);self.c.commit()
+  d=state(self.data,{'parent':str(self.root)});self.assertEqual(d['mapTree'][0]['p'],p);self.assertTrue(d['mapTree'][0]['file']);self.assertEqual(d['mapTree'][0]['n'],123)
+ def test_current_codex_custom_tool_schema_is_attributed(self):
+  p=self.root/'current.jsonl';target=str(self.root/'new_folder'/'real.py');ts=time.time()
+  p.write_text(json.dumps({'type':'session_meta','payload':{'id':'current-codex','cwd':str(self.root)}})+'\n'+json.dumps({'timestamp':dt.datetime.fromtimestamp(ts,dt.timezone.utc).isoformat(),'payload':{'type':'custom_tool_call','name':'exec','input':'await tools.apply_patch('+json.dumps('*** Begin Patch\n*** Update File: '+target+'\n@@\n-before\n+after\n*** End Patch')+');'}}))
+  parsed=read_session(p,'Codex');index=SessionIndex();index.sessions[str(p)]=(ts,parsed);matched=index.match(target,ts);self.assertEqual(matched['confidence'],'tool-evidence');self.assertEqual(matched['session'],'current-codex')
+ def test_cache_growth_filter_accepts_rule_forward_slashes(self):
+  p=str(self.root/'npm-cache'/'entry');observe(self.c,p,10,1,baseline=True);observe(self.c,p,20,2);self.c.commit()
+  growth=state(self.data,{})['growth'][0];filtered=state(self.data,{'q':growth['p']});self.assertEqual(filtered['totalEvents'],1)
+ def test_windows_status_replace_retries_brief_reader_lock(self):
+  from collector import atomic
+  target=self.root/'status.json';replace=os.replace;calls=[]
+  def transient(src,dst):
+   calls.append(1)
+   if len(calls)<3:raise PermissionError('Windows reader briefly holds destination')
+   return replace(src,dst)
+  with patch('collector.os.replace',side_effect=transient):atomic(target,{'healthy':True})
+  self.assertEqual(json.loads(target.read_text()),{'healthy':True});self.assertEqual(len(calls),3)
  def read_status(self):
   try:return json.loads((self.data/'status.json').read_text())
   except (OSError,ValueError):return {'phase':'starting'}

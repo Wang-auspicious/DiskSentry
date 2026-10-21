@@ -2,9 +2,9 @@
 
 The current-user Windows installation was tested against real filesystem notifications, not only a mock UI.
 
-- Unit/integration command: `python -m unittest discover -s tests -v` (24 tests).
+- Unit/integration command: `python -m unittest discover -s tests -v` (28 tests).
 - Live fixture: a 119-byte text file appeared in the real collector index in **281 ms**.
-- Live authenticated state query: **140 ms** in the recorded run. Latency varies with hardware and scan load; this is a measurement, not a guarantee.
+- Live authenticated state query: **140 ms** in an earlier run; **609–610 ms** with approximately 679,000 indexed files and the initial inventory active in the final check. Latency varies with hardware and scan load; this is a measurement, not a guarantee.
 - OpenCode Go / `deepseek-flash` generated an actual structured summary for that fixture. SHA-256 of the file before and after analysis was identical.
 - Initial inventory creates no AI jobs. Automatic AI waits for the first full scan; manual requests were explicitly tested.
 - Windows create/grow/move/delete events for small files, all-file indexing and interrupted scan queues are exercised by the integration harness.
@@ -17,6 +17,7 @@ The current-user Windows installation was tested against real filesystem notific
 - Ego Browser exercised date presets, custom datetime inputs, RAM view, candidates, map, settings and file details. Its pixel capture returned an unusable frame on this host, so an isolated local Chromium process supplied visual QA.
 - Restored the nested pastel treemap as the default view, with cache hatching, a period-growth map and visual candidate ring. Directory byte remainders, multiple roots and live-growth reconciliation are covered by tests. Source evidence is persisted for later historical queries.
 - Local Chromium desktop and 390-pixel mobile views had no uncaught JavaScript errors and no horizontal overflow.
+- Real Codex custom-tool-call JSONL records matched this project’s file changes and six evidence records were persisted in the final check; forward-slash cache filters and transient Windows status-file reader locks have regressions.
 - The desktop and previous “磁盘哨兵” shortcuts target the new desktop repository.
 - The current-user Task Scheduler watchdog and login entry were installed without elevation.
 

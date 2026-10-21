@@ -24,7 +24,13 @@ def roots():
     return [p.mountpoint for p in psutil.disk_partitions() if 'fixed' in p.opts and p.fstype]
 
 def atomic(path,value):
-    temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value,ensure_ascii=False),encoding='utf8');os.replace(temp,path)
+    temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value,ensure_ascii=False),encoding='utf8')
+    # Windows readers/antivirus may briefly hold the destination without delete sharing.
+    for attempt in range(8):
+        try:os.replace(temp,path);return
+        except PermissionError:
+            if attempt==7:raise
+            time.sleep(.01*(attempt+1))
 
 class Pending(FileSystemEventHandler):
     def __init__(self,data):self.lock=threading.Lock();self.items={};self.overflow=0;self.data=str(data).lower()

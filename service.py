@@ -3,6 +3,7 @@ from contextlib import closing
 import csv
 import datetime as dt
 import hashlib
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import io
 import json
@@ -24,6 +25,9 @@ APP=Path(__file__).resolve().parent
 def identity(path):return hashlib.sha256(str(path).lower().encode()).hexdigest()[:24]
 def record(row):
     r=dict(row);r['id']=identity(r['p']);r['rule']=classify(r['p'],r.get('m',0));return r
+
+@lru_cache(maxsize=16384)
+def growth_group(path):return classify(path)['bucket'] or os.path.dirname(path)
 
 def space_tree(c,parents,depth=3,budget=260):
     """Bounded, indexed directory hierarchy. Remainders retain actual scanned bytes."""
@@ -57,6 +61,7 @@ def space_tree(c,parents,depth=3,budget=260):
 
 def query_events(c,begin,end,q='',drive='',kind='',limit=200,offset=0):
     sql='ts>=? AND ts<?';args=[begin,end]
+    if os.name=='nt':q=q.replace('/','\\')
     if q:sql+=' AND instr(lower(p),lower(?))>0';args.append(q)
     if drive:sql+=' AND substr(p,1,?)=? COLLATE NOCASE';args.extend([len(drive),drive])
     if kind:sql+=' AND kind=?';args.append(kind)
@@ -69,7 +74,9 @@ def preserve_attribution(data,index=INDEX):
     # Wait for JSONL flush/indexing, then persist evidence for future date queries.
     # Unknown stays explicit. No raw conversation text is saved or sent.
     with closing(connect(data)) as c:
-        rows=c.execute("SELECT id,p,ts FROM events WHERE ts<? AND (evidence IS NULL OR evidence='{}') ORDER BY id LIMIT 2000",(time.time()-40,)).fetchall()
+        now=time.time()
+        rows=c.execute("SELECT id,p,ts FROM events WHERE ts<? AND (evidence IS NULL OR evidence='{}') ORDER BY id LIMIT 1500",(now-40,)).fetchall()
+        rows+=c.execute("SELECT id,p,ts FROM events WHERE ts>? AND ts<? AND json_extract(evidence,'$.confidence')='unknown' ORDER BY id DESC LIMIT 500",(now-300,now-40)).fetchall()
         c.executemany('UPDATE events SET evidence=? WHERE id=?',[(json.dumps(index.match(r['p'],r['ts']),ensure_ascii=False),r['id']) for r in rows]);c.commit()
 
 def state(data,query):
@@ -80,7 +87,7 @@ def state(data,query):
         summary_where='ts>=? AND ts<?';summary_args=[begin,end]
         if query.get('drive'):summary_where+=' AND substr(p,1,?)=? COLLATE NOCASE';summary_args.extend([len(query['drive']),query['drive']])
         sums=c.execute('SELECT count(*) count,coalesce(sum(CASE WHEN delta>0 THEN delta ELSE 0 END),0) added,coalesce(sum(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) freed,coalesce(sum(delta),0) net,sum(CASE WHEN delta IS NULL THEN 1 ELSE 0 END) unknown FROM events WHERE '+summary_where,summary_args).fetchone()
-        c.create_function('growth_group',1,lambda p:classify(p)['bucket'] or os.path.dirname(p))
+        c.create_function('growth_group',1,growth_group)
         growth=[dict(r) for r in c.execute('SELECT growth_group(p) p,sum(delta) net,count(*) events FROM events WHERE '+summary_where+' GROUP BY growth_group(p) HAVING sum(delta)>0 ORDER BY net DESC LIMIT 80',summary_args)]
         disks=[]
         roots=[r[0] for r in c.execute('SELECT DISTINCT root FROM volumes')]
@@ -102,6 +109,13 @@ def state(data,query):
         else:folders=[dict(r) for r in c.execute("SELECT * FROM folders WHERE p IN (SELECT root FROM volumes) ORDER BY n DESC")]
         if not parent and query.get('drive'):folders=[r for r in folders if r['p'].casefold()==query['drive'].casefold()]
         map_tree=space_tree(c,folders)
+        if parent and not map_tree:
+            # A leaf directory still needs a visual: show its files, not a blank map.
+            prefix=parent.rstrip('\\/')+os.sep
+            map_tree=[dict(r,name=os.path.basename(r['p']),children=[],file=True) for r in c.execute('SELECT p,n FROM files WHERE p>=? COLLATE NOCASE AND p<? COLLATE NOCASE ORDER BY n DESC LIMIT 40',(prefix,prefix+'\U0010ffff')) if r['n']>0]
+            folder=c.execute('SELECT n FROM folders WHERE p=?',(parent,)).fetchone()
+            remainder=max(0,(folder['n'] if folder else 0)-sum(r['n'] for r in map_tree))
+            if remainder:map_tree.append(dict(p=parent,name='其余已扫描文件',n=remainder,files=0,children=[],remainder=True))
         mem=[dict(r) for r in c.execute('SELECT ts,used,total FROM memory WHERE ts>=? AND ts<? ORDER BY ts',(begin,end))]
         mem=mem[::max(1,len(mem)//240)]
         latest=c.execute('SELECT * FROM memory ORDER BY ts DESC LIMIT 1').fetchone()

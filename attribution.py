@@ -31,9 +31,9 @@ def read_session(path,agent,max_bytes=262144):
             ts=timestamp(obj.get('timestamp') or obj.get('time') or obj.get('created_at'));payload=obj.get('payload') or obj.get('message') or obj
             if not isinstance(payload,dict):continue
             calls=[]
-            if payload.get('type') in ('function_call','tool_use','toolCall'):calls.append(payload)
+            if payload.get('type') in ('function_call','custom_tool_call','tool_use','toolCall'):calls.append(payload)
             for c in payload.get('content',[]) if isinstance(payload.get('content'),list) else []:
-                if isinstance(c,dict) and c.get('type') in ('tool_use','toolCall','function_call'):calls.append(c)
+                if isinstance(c,dict) and c.get('type') in ('tool_use','toolCall','function_call','custom_tool_call'):calls.append(c)
             for call in calls:
                 tool=str(call.get('name') or call.get('toolName') or '')
                 args=call.get('arguments',call.get('input',{}))
@@ -45,9 +45,13 @@ def read_session(path,agent,max_bytes=262144):
                 patch_write=False
                 for value in args.values():
                     if isinstance(value,str) and '*** ' in value:
-                        normalized_patch=value.replace('\\n','\n').replace('\\\\','\\')
-                        targets=re.findall(r'\*\*\* (?:Add|Update|Delete) File: ([^\n\r\"]+)',normalized_patch)
-                        paths+=targets;patch_write=patch_write or bool(targets)
+                        patches=[value] if value.lstrip().startswith('*** ') else []
+                        for literal in re.findall(r'apply_patch\(\s*("(?:\\.|[^"\\])*")',value):
+                            try:patches.append(json.loads(literal))
+                            except ValueError:pass
+                        for patch in patches:
+                            targets=re.findall(r'^\*\*\* (?:Add|Update|Delete) File: ([^\n\r]+)',patch,re.M)
+                            paths+=targets;patch_write=patch_write or bool(targets)
                 for target in paths:
                     if not os.path.isabs(target) and cwd:target=os.path.join(cwd,target)
                     records.append({'path':os.path.normcase(os.path.abspath(target)),'ts':ts,'tool':tool,'write':patch_write or any(t in tool.lower() for t in WRITE_TOOLS)})
@@ -72,7 +76,12 @@ class SessionIndex:
         with self.lock:
             for m,p,agent in recent:
                 old=self.sessions.get(str(p))
-                if not old or old[0]!=m:self.sessions[str(p)]=(m,read_session(p,agent))
+                if not old or old[0]!=m:
+                    parsed=read_session(p,agent)
+                    if parsed and old and old[1]:
+                        merged={(r['path'],r['ts'],r['tool']):r for r in old[1]['records']+parsed['records']}
+                        parsed['records']=list(merged.values())[-400:]
+                    self.sessions[str(p)]=(m,parsed)
             keep={str(p) for _,p,_ in recent};self.sessions={p:v for p,v in self.sessions.items() if p in keep}
             self.last_refresh=time.time()
             self._reindex()
@@ -82,7 +91,7 @@ class SessionIndex:
             if s:
                 for r in s['records']:self.paths.setdefault(r['path'],[]).append((s,r))
     def match(self,path,when=None):
-        normalized=os.path.normcase(os.path.abspath(path));when=when or time.time();best=None
+        normalized=os.path.normcase(os.path.abspath(path));when=when or time.time();matches=[]
         with self.lock:
             if not self.paths:self._reindex()
             for modified,s in self.sessions.values():
@@ -92,9 +101,8 @@ class SessionIndex:
             for s,r in self.paths.get(normalized,[]):
                 if abs(r['ts']-when)<=300:
                     candidate=dict(agent=s['agent'],confidence='tool-evidence' if r['write'] else 'reference',reason='会话中存在写入工具调用（与文件事件时间相关）' if r['write'] else '会话提及文件，不能证明写入者',session=s['session'],jsonl=s['jsonl'],tool=r['tool'],time=r['ts'])
-                    if r['write']:return candidate
-                    best=candidate
-        if best:return best
+                    matches.append((not r['write'],abs(r['ts']-when),candidate))
+        if matches:return min(matches,key=lambda r:(r[0],r[1]))[2]
         p=normalized.replace('\\','/')
         for marker,agent in [('/.codex/','Codex'),('/.pi/','Pi Agent'),('/.claude/','Claude Code'),('/opencode/','OpenCode')]:
             if marker in p:return dict(agent=agent,confidence='path-inference',reason='依据目录推测，未获取写入进程或具体对话证据')
