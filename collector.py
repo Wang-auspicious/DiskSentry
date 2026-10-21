@@ -37,7 +37,8 @@ class Pending(FileSystemEventHandler):
             kind='created' if old and old[0]=='created' and e.event_type=='modified' else e.event_type
             self.items[e.src_path]=(kind,getattr(e,'dest_path',None),e.is_directory,time.time())
     def take(self):
-        with self.lock:result=self.items;self.items={};return result
+        with self.lock:
+            keys=list(self.items)[:1000];return {k:self.items.pop(k) for k in keys}
 
 def processes():
     result=[]
@@ -46,14 +47,15 @@ def processes():
             info=p.info;cmd=' '.join(info['cmdline'] or []).lower();agent=next((a for a in ('codex','claude','opencode','pi-coding-agent','cursor','gemini') if a in cmd),'')
             result.append(dict(pid=info['pid'],name=info['name'],rss=info['memory_info'].rss,agent=agent,created=info['create_time']))
         except (psutil.Error,TypeError,AttributeError):pass
-    return sorted(result,key=lambda p:p['rss'],reverse=True)[:30]
+    ordered=sorted(result,key=lambda p:p['rss'],reverse=True);top=ordered[:30]
+    return top+[p for p in ordered[30:] if p['agent']]
 
 class Collector:
     def __init__(self,data=None,watch_roots=None):
         self.data=Path(data or data_dir());initialize(self.data);self.c=connect(self.data)
         self.stop=threading.Event();self.pending=Pending(self.data);self.observers={};self.scan_messages=queue.Queue(48)
         self.roots=watch_roots or roots();self.last_resources=0;self.last_folders=0;self.revision=0;self.thread=None
-        self.state=dict(pid=os.getpid(),phase='starting',roots=self.roots,heartbeat=time.time(),indexed=meta(self.c,'indexed',0),scanned=0,skipped=0,errors=[],coverage_complete=all(meta(self.c,'baseline:'+r,False) for r in self.roots))
+        self.state=dict(pid=os.getpid(),phase='starting',roots=self.roots,heartbeat=time.time(),indexed=self.c.execute('SELECT count(*) FROM files').fetchone()[0],scanned=0,skipped=0,errors=[],coverage_complete=all(meta(self.c,'baseline:'+r,False) for r in self.roots))
         self.scan_acks=queue.SimpleQueue();self.ack_pending=[]
 
     def resource_sample(self,now=None):
@@ -71,6 +73,7 @@ class Collector:
                 if not meta(c,'baseline:'+root,False) and not c.execute('SELECT 1 FROM scan_queue WHERE root=?',(root,)).fetchone():
                     c.execute('INSERT OR IGNORE INTO scan_queue VALUES (?,?,?)',(root,root,100))
             c.commit()
+            c.execute("UPDATE scan_queue SET priority=95 WHERE instr(lower(p),'users')>0");c.commit()
             inflight=set()
             while not self.stop.is_set():
                 while not self.scan_acks.empty():inflight.discard(self.scan_acks.get_nowait())
@@ -92,6 +95,7 @@ class Collector:
                                     if getattr(s,'st_file_attributes',0)&0x400:continue
                                     if str(entry.path).lower().startswith(str(self.data).lower()):continue
                                     priority=90 if any(x in entry.path.lower() for x in ('.codex','.pi','.claude','desktop','documents')) else 10
+                                    if 'users' in entry.path.lower():priority=95
                                     if any(x in entry.path.lower() for x in ('windows','node_modules','site-packages')):priority=0
                                     children.append((entry.path,root,priority))
                                 elif entry.is_file(follow_symlinks=False):
@@ -161,25 +165,51 @@ class Collector:
     def live(self):
         for p,(kind,dst,isdir,ts) in self.pending.take().items():
             try:
-                if kind=='moved':moved(self.c,p,dst,ts);p=dst
+                if kind in ('moved','deleted'):
+                    prefix=p.rstrip('\\/')+os.sep
+                    prior=self.c.execute('SELECT p,n FROM files WHERE p=? OR (p>=? COLLATE NOCASE AND p<? COLLATE NOCASE)',(p,prefix,prefix+'\U0010ffff')).fetchall()
+                    if kind=='deleted':removed(self.c,p,ts)
+                    else:
+                        targets=[(dst+r['p'][len(p):],r['n']) for r in prior]
+                        for target,_ in targets:
+                            existing=self.c.execute('SELECT n FROM files WHERE p=?',(target,)).fetchone()
+                            if existing and target.casefold()!=p.casefold():self.adjust_live(target,-existing['n'],-1)
+                        moved(self.c,p,dst,ts)
+                    for r in prior:self.adjust_live(r['p'],-r['n'],-1)
+                    if kind=='moved':
+                        for target,n in targets:self.adjust_live(target,n,1)
+                        p=dst
+                    else:continue
                 if kind=='deleted':
-                    old=self.c.execute('SELECT n FROM files WHERE p=?',(p,)).fetchone();removed(self.c,p,ts)
-                    if old:rollup(self.c,os.path.dirname(p),-old['n'],-1)
                     continue
                 if isdir:
-                    if kind=='created':
+                    if kind in ('created','moved'):
                         root=next((r for r in self.roots if p.lower().startswith(r.lower())),self.roots[0]);self.c.execute('INSERT OR IGNORE INTO scan_queue VALUES (?,?,90)',(p,root))
                     continue
                 s=os.stat(p,follow_symlinks=False)
                 old=self.c.execute('SELECT n FROM files WHERE p=?',(p,)).fetchone()
                 event=observe(self.c,p,s.st_size,s.st_mtime,source='watch',ts=ts,created=kind=='created')
                 if event:
-                    rollup(self.c,os.path.dirname(p),s.st_size-(old['n'] if old else 0),0 if old else 1)
+                    self.adjust_live(p,s.st_size-(old['n'] if old else 0),0 if old else 1)
                     # Only live changes enqueue optional AI, never initialization/reconciliation.
                     if classify(p,s.st_mtime)['category']!='secrets':
                         fp=f'{s.st_size}:{s.st_mtime}';self.c.execute("INSERT INTO ai_jobs VALUES (?,?,'pending',?,NULL) ON CONFLICT(p) DO UPDATE SET fingerprint=excluded.fingerprint,status='pending',requested=excluded.requested,error=NULL",(p,fp,time.time()))
-            except FileNotFoundError:removed(self.c,p,ts)
+            except FileNotFoundError:
+                old=self.c.execute('SELECT n FROM files WHERE p=?',(p,)).fetchone();removed(self.c,p,ts)
+                if old:self.adjust_live(p,-old['n'],-1)
             except OSError:pass
+
+    def adjust_live(self,path,delta,count):
+        directory=os.path.dirname(path)
+        # A directory not yet scanned is added by its first complete snapshot.
+        # Updating the cached direct total prevents reconciliation double counting.
+        if not self.c.execute('SELECT 1 FROM scan_dirs WHERE p=?',(directory,)).fetchone():return
+        self.c.execute('UPDATE scan_dirs SET n=max(0,n+?),files=max(0,files+?) WHERE p=?',(delta,count,directory))
+        rollup(self.c,directory,delta,count)
+        rule=classify(path)
+        if rule['bucket']:
+            self.c.execute('INSERT INTO candidate_parts VALUES (?,?,?,?,?,?) ON CONFLICT(dir,bucket) DO UPDATE SET n=max(0,n+?),files=max(0,files+?),risk=excluded.risk,reason=excluded.reason',
+                (directory,rule['bucket'],max(0,delta),max(0,count),rule['risk'],rule['reason'],delta,count))
 
     def run(self):
         self.resource_sample();self.c.commit();self.launch_scan()
@@ -200,6 +230,7 @@ class Collector:
                 if now-self.last_resources>=15:self.resource_sample(now);self.last_resources=now
                 if now-self.last_folders>=30:
                     self.c.execute('DELETE FROM candidates');self.c.execute('INSERT INTO candidates SELECT bucket,sum(n),sum(files),risk,reason,? FROM candidate_parts GROUP BY bucket',(now,));self.last_folders=now
+                    self.state['indexed']=self.c.execute('SELECT count(*) FROM files').fetchone()[0]
                 if (self.data/'rescan.request').exists() or now>next_scan:
                     (self.data/'rescan.request').unlink(missing_ok=True);self.launch_scan(True);next_scan=now+6*3600
                 if not (self.thread and self.thread.is_alive()) and self.c.execute('SELECT 1 FROM scan_queue').fetchone():self.launch_scan()
@@ -215,4 +246,5 @@ class Collector:
             self.stop.set()
             for ob in self.observers.values():ob.stop()
             for ob in self.observers.values():ob.join(3)
+            if self.thread:self.thread.join(3)
             self.state.update(phase='stopped',heartbeat=time.time());setmeta(self.c,'status',self.state);self.c.commit();atomic(self.data/'status.json',self.state);self.c.close()

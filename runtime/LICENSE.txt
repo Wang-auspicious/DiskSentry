@@ -1,0 +1,5 @@
+SQLite is in the public domain: https://www.sqlite.org/copyright.html
+Included Windows x64 SQLite library: 3.53.1, from the bundled trusted Python 3.12.14 runtime.
+Upstream source: https://www.sqlite.org/2026/sqlite-amalgamation-3530100.zip
+The app loads this DLL locally. It never replaces the user's system Python/DLLs.
+WAL reset bug fix: https://www.sqlite.org/releaselog/3_51_3.html

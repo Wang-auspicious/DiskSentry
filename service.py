@@ -25,6 +25,36 @@ def identity(path):return hashlib.sha256(str(path).lower().encode()).hexdigest()
 def record(row):
     r=dict(row);r['id']=identity(r['p']);r['rule']=classify(r['p'],r.get('m',0));return r
 
+def space_tree(c,parents,depth=3,budget=260):
+    """Bounded, indexed directory hierarchy. Remainders retain actual scanned bytes."""
+    remaining=[budget]
+    def node(row,level):
+        r=dict(row);r['name']=os.path.basename(r['p'].rstrip('\\/')) or r['p'];r['children']=[]
+        remaining[0]-=1
+        if level and remaining[0]>0:
+            children=c.execute('SELECT p,n,files FROM folders WHERE parent=? AND n>0 ORDER BY n DESC LIMIT 13',(r['p'],)).fetchall()
+            chosen=children[:12]
+            # Skip uninformative single-child wrappers while preserving their path.
+            label=r['name'];current=r
+            for _ in range(3):
+                if len(children)!=1 or children[0]['n']<current['n']*.99:break
+                current=dict(children[0]);label+=' / '+(os.path.basename(current['p'].rstrip('\\/')) or current['p'])
+                children=c.execute('SELECT p,n,files FROM folders WHERE parent=? AND n>0 ORDER BY n DESC LIMIT 13',(current['p'],)).fetchall();chosen=children[:12]
+                r.update(p=current['p'],name=label)
+            for child in chosen:
+                if remaining[0]<=0:break
+                r['children'].append(node(child,level-1))
+            rest=max(0,r['n']-sum(v['n'] for v in r['children']))
+            if r['children'] and rest:
+                r['children'].append(dict(p=r['p'],name='本层文件与其余目录',n=rest,files=0,children=[],remainder=True))
+        return r
+    result=[]
+    for r in parents:
+        if r['n']<=0:continue
+        remaining[0]=max(1,budget//max(1,len(parents)))
+        result.append(node(r,depth))
+    return result
+
 def query_events(c,begin,end,q='',drive='',kind='',limit=200,offset=0):
     sql='ts>=? AND ts<?';args=[begin,end]
     if q:sql+=' AND instr(lower(p),lower(?))>0';args.append(q)
@@ -35,6 +65,13 @@ def query_events(c,begin,end,q='',drive='',kind='',limit=200,offset=0):
     for r in rows:r['rule']=classify(r['p']);r['attribution']=json.loads(r.get('evidence') or '{}') or INDEX.match(r['p'],r['ts'])
     return rows,count
 
+def preserve_attribution(data,index=INDEX):
+    # Wait for JSONL flush/indexing, then persist evidence for future date queries.
+    # Unknown stays explicit. No raw conversation text is saved or sent.
+    with closing(connect(data)) as c:
+        rows=c.execute("SELECT id,p,ts FROM events WHERE ts<? AND (evidence IS NULL OR evidence='{}') ORDER BY id LIMIT 2000",(time.time()-40,)).fetchall()
+        c.executemany('UPDATE events SET evidence=? WHERE id=?',[(json.dumps(index.match(r['p'],r['ts']),ensure_ascii=False),r['id']) for r in rows]);c.commit()
+
 def state(data,query):
     begin,end=date_range(query.get('period','today'),query.get('start'),query.get('end'))
     with closing(connect(data)) as c:
@@ -43,6 +80,8 @@ def state(data,query):
         summary_where='ts>=? AND ts<?';summary_args=[begin,end]
         if query.get('drive'):summary_where+=' AND substr(p,1,?)=? COLLATE NOCASE';summary_args.extend([len(query['drive']),query['drive']])
         sums=c.execute('SELECT count(*) count,coalesce(sum(CASE WHEN delta>0 THEN delta ELSE 0 END),0) added,coalesce(sum(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) freed,coalesce(sum(delta),0) net,sum(CASE WHEN delta IS NULL THEN 1 ELSE 0 END) unknown FROM events WHERE '+summary_where,summary_args).fetchone()
+        c.create_function('growth_group',1,lambda p:classify(p)['bucket'] or os.path.dirname(p))
+        growth=[dict(r) for r in c.execute('SELECT growth_group(p) p,sum(delta) net,count(*) events FROM events WHERE '+summary_where+' GROUP BY growth_group(p) HAVING sum(delta)>0 ORDER BY net DESC LIMIT 80',summary_args)]
         disks=[]
         roots=[r[0] for r in c.execute('SELECT DISTINCT root FROM volumes')]
         for root in roots:
@@ -61,12 +100,21 @@ def state(data,query):
         parent=query.get('parent','')
         if parent:folders=[dict(r) for r in c.execute('SELECT * FROM folders WHERE parent=? ORDER BY n DESC LIMIT 80',(parent,))]
         else:folders=[dict(r) for r in c.execute("SELECT * FROM folders WHERE p IN (SELECT root FROM volumes) ORDER BY n DESC")]
+        if not parent and query.get('drive'):folders=[r for r in folders if r['p'].casefold()==query['drive'].casefold()]
+        map_tree=space_tree(c,folders)
         mem=[dict(r) for r in c.execute('SELECT ts,used,total FROM memory WHERE ts>=? AND ts<? ORDER BY ts',(begin,end))]
         mem=mem[::max(1,len(mem)//240)]
         latest=c.execute('SELECT * FROM memory ORDER BY ts DESC LIMIT 1').fetchone()
+        process_history={};sample_count=c.execute('SELECT count(*) FROM memory WHERE ts>=? AND ts<?',(begin,end)).fetchone()[0];stride=max(1,(sample_count+999)//1000)
+        for sample in c.execute('SELECT ts,processes FROM memory WHERE ts>=? AND ts<? AND rowid%?=0 ORDER BY ts',(begin,end,stride)):
+            for process in json.loads(sample['processes']):
+                k=(process['pid'],process['created']);old=process_history.get(k)
+                if not old:old=dict(process,firstRss=process['rss'],peak=process['rss'],firstAt=sample['ts']);process_history[k]=old
+                old.update(rss=process['rss'],lastAt=sample['ts'],peak=max(old['peak'],process['rss']));old['delta']=old['rss']-old['firstRss']
+        process_history=sorted(process_history.values(),key=lambda p:p['peak'],reverse=True)[:40]
         ai=public_config();ai['enabled']=meta(c,'ai_enabled',True);ai['jobs']={r[0]:r[1] for r in c.execute('SELECT status,count(*) FROM ai_jobs GROUP BY status')}
         storage_size=sum(p.stat().st_size for p in Path(data).glob('index.sqlite3*'))
-        return dict(version='2.0',now=time.time(),range=dict(start=begin,end=end),recordingSince=meta(c,'recording_since'),legacyWarning=meta(c,'legacy_import_error'),historyGap=meta(c,'history_gap'),status=status,healthy=healthy,summary=dict(sums),disks=disks,events=rows,totalEvents=total,largest=largest,folders=folders,candidates=candidates,memory=dict(history=mem,current=dict(ts=latest['ts'],used=latest['used'],total=latest['total'],processes=json.loads(latest['processes'])) if latest else None),ai=ai,indexBytes=storage_size)
+        return dict(version='2.0',now=time.time(),range=dict(start=begin,end=end),recordingSince=meta(c,'recording_since'),legacyWarning=meta(c,'legacy_import_error'),historyGap=meta(c,'history_gap'),status=status,healthy=healthy,summary=dict(sums),growth=growth,disks=disks,events=rows,totalEvents=total,largest=largest,folders=folders,mapTree=map_tree,candidates=candidates,memory=dict(history=mem,processHistory=process_history,current=dict(ts=latest['ts'],used=latest['used'],total=latest['total'],processes=json.loads(latest['processes'])) if latest else None),ai=ai,indexBytes=storage_size)
 
 def detail(data,path,event_id=None):
     with closing(connect(data)) as c:
@@ -74,9 +122,10 @@ def detail(data,path,event_id=None):
         event=c.execute('SELECT * FROM events WHERE id=?',(event_id,)).fetchone() if event_id else None
         if not row and not c.execute('SELECT 1 FROM candidates WHERE p=?',(path,)).fetchone() and not c.execute('SELECT 1 FROM events WHERE p=?',(path,)).fetchone():raise ValueError('该路径不在索引中')
         events=[dict(r) for r in c.execute('SELECT * FROM events WHERE p=? ORDER BY ts DESC LIMIT 100',(path,))]
-        info=dict(row) if row else {'p':path,'n':event['n'] if event else 0,'m':0}
+        candidate=c.execute('SELECT * FROM candidates WHERE p=?',(path,)).fetchone()
+        info=dict(row) if row else {'p':path,'n':candidate['n'] if candidate else event['n'] if event else 0,'m':0}
         cached=c.execute('SELECT * FROM ai_cache WHERE p=?',(path,)).fetchone();job=c.execute('SELECT status,error FROM ai_jobs WHERE p=?',(path,)).fetchone()
-        fresh=bool(cached and row and cached['fingerprint']==f"{row['n']}:{row['m']}")
+        fresh=bool(cached and cached['fingerprint']==f"{info['n']}:{info.get('m',0)}")
         evidence=INDEX.match(path,event['ts'] if event else info['m'])
         return dict(file=info,rule=classify(path,info.get('m',0)),evidence=evidence,events=events,ai=json.loads(cached['result']) if cached else None,aiFresh=fresh,job=dict(job) if job else None)
 
@@ -138,7 +187,7 @@ def handler(data,token):
 def serve(data=None):
     from collector import atomic
     data=Path(data or data_dir());initialize(data);token=secrets.token_urlsafe(32)
-    stop=threading.Event();start_indexer(stop);worker(data,stop)
+    stop=threading.Event();start_indexer(stop,lambda:preserve_attribution(data));worker(data,stop)
     server=ThreadingHTTPServer(('127.0.0.1',0),handler(data,token));server.daemon_threads=True
     atomic(data/'dashboard.json',{'pid':os.getpid(),'port':server.server_port,'token':token})
     try:server.serve_forever()

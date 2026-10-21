@@ -52,7 +52,7 @@ def completion(payload,cfg=None):
         raise RuntimeError(f'OpenCode Go HTTP {e.code}') from None
 
 def analyze(path,info=None):
-    try:s=os.stat(path,follow_symlinks=False);n=s.st_size;m=s.st_mtime;excerpt=safe_excerpt(path)
+    try:s=os.stat(path,follow_symlinks=False);n=(info or {}).get('n',s.st_size) if os.path.isdir(path) else s.st_size;m=s.st_mtime;excerpt=safe_excerpt(path)
     except FileNotFoundError:n=(info or {}).get('n',0);m=(info or {}).get('ts',0);excerpt=None
     rule=classify(path,m)
     if rule['category']=='secrets':return {'summary':'敏感凭据文件，已在本地跳过 AI','origin':'本地隐私规则','deletionAdvice':'保留','confidence':'本地规则'}
@@ -61,17 +61,19 @@ def analyze(path,info=None):
 def worker(data,stop):
     def loop():
         c=connect(data)
+        c.execute("UPDATE ai_jobs SET status='pending' WHERE status='running'");c.commit()
         try:
             while not stop.is_set():
                 cfg=discover()
                 enabled=meta(c,'ai_enabled',True)
                 job=c.execute("SELECT * FROM ai_jobs WHERE status IN ('manual','pending') AND requested<? ORDER BY CASE status WHEN 'manual' THEN 0 ELSE 1 END,requested DESC LIMIT 1",(time.time()-10,)).fetchone()
-                if not cfg['key'] or not enabled or not job:stop.wait(5);continue
+                if not cfg['key'] or not job or (not enabled and job['status']!='manual'):stop.wait(5);continue
                 if job['status']=='pending' and not meta(c,'status',{}).get('coverage_complete',False):stop.wait(5);continue
                 # A snapshot's jobs are never generated; only observed events or explicit requests.
                 try:
                     c.execute("UPDATE ai_jobs SET status='running',error=NULL WHERE p=?",(job['p'],));c.commit()
                     event=c.execute('SELECT ts,kind,b,n,delta,source FROM events WHERE p=? ORDER BY ts DESC LIMIT 1',(job['p'],)).fetchone()
+                    if not event:event=c.execute('SELECT n,files,risk,reason FROM candidates WHERE p=?',(job['p'],)).fetchone()
                     result=analyze(job['p'],dict(event) if event else None)
                     c.execute('INSERT OR REPLACE INTO ai_cache VALUES (?,?,?,?)',(job['p'],job['fingerprint'],json.dumps(result,ensure_ascii=False),time.time()))
                     c.execute("UPDATE ai_jobs SET status='done' WHERE p=? AND fingerprint=?",(job['p'],job['fingerprint']));c.commit()

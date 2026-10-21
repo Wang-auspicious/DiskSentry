@@ -73,6 +73,7 @@ class SessionIndex:
             for m,p,agent in recent:
                 old=self.sessions.get(str(p))
                 if not old or old[0]!=m:self.sessions[str(p)]=(m,read_session(p,agent))
+            keep={str(p) for _,p,_ in recent};self.sessions={p:v for p,v in self.sessions.items() if p in keep}
             self.last_refresh=time.time()
             self._reindex()
     def _reindex(self):
@@ -101,10 +102,12 @@ class SessionIndex:
 
 INDEX=SessionIndex()
 
-def start_indexer(stop):
+def start_indexer(stop,on_refresh=None):
     def loop():
         while not stop.is_set():
-            try:INDEX.refresh()
+            try:
+                INDEX.refresh()
+                if on_refresh:on_refresh()
             except Exception:pass
             stop.wait(30)
     t=threading.Thread(target=loop,daemon=True);t.start();return t

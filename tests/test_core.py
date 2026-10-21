@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import queue
-import sqlite3
+from sqlite_runtime import sqlite3
 import tempfile
 import threading
 import time
@@ -15,7 +15,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from storage import initialize,connect,observe,removed,moved,date_range,rollup,meta
 from collector import Collector,Observer
 from rules import classify,safe_excerpt
-from attribution import read_session,SessionIndex
+from attribution import read_session,SessionIndex,INDEX
 from service import state,detail,handler
 from http.server import ThreadingHTTPServer
 import urllib.request,urllib.error
@@ -96,6 +96,54 @@ class CoreTests(unittest.TestCase):
    if 'collector' in holder:holder['collector'].stop.set()
    t.join(5)
   self.assertFalse(t.is_alive());self.assertEqual(self.c.execute('select count(*) from scan_queue').fetchone()[0],0)
+ def test_pipeline_indexes_many_directories_and_integrity(self):
+  watch=self.root/'batch';watch.mkdir()
+  for i in range(80):
+   directory=watch/str(i);directory.mkdir();(directory/'f.txt').write_text('hello')
+  holder={}
+  def run():
+   col=Collector(self.data,[str(watch)]);holder['c']=col;col.run()
+  started=time.monotonic();t=threading.Thread(target=run);t.start()
+  try:self.wait(lambda:self.read_status()['phase']=='watching')
+  finally:
+   if 'c' in holder:holder['c'].stop.set()
+   t.join(5)
+  self.assertLess(time.monotonic()-started,12)
+  self.assertEqual(self.c.execute('select count(*) from files').fetchone()[0],80)
+  self.assertEqual(self.c.execute('pragma integrity_check').fetchone()[0],'ok')
+ def test_grouping_finds_small_cache_file_growth(self):
+  p=str(self.root/'npm-cache'/'file');observe(self.c,p,10,1,baseline=True);observe(self.c,p,30,2);self.c.commit();d=state(self.data,{});self.assertEqual(d['growth'][0]['net'],20);self.assertTrue(d['growth'][0]['p'].endswith('npm-cache'))
+ def test_readonly_ai_deleted_file_uses_observed_metadata(self):
+  from ai_analysis import analyze
+  p=self.root/'gone.txt'
+  with patch('ai_analysis.completion',return_value={'summary':'deleted'}) as call:
+   analyze(p,{'n':0,'b':400,'kind':'deleted','ts':time.time()});self.assertEqual(call.call_args.args[0]['change']['b'],400);self.assertIsNone(call.call_args.args[0]['bounded_readonly_excerpt'])
+ def test_patched_sqlite_loaded(self):
+  from sqlite_runtime import safe_wal
+  self.assertTrue(safe_wal());self.assertGreaterEqual(sqlite3.sqlite_version_info,(3,51,3))
+ def test_nested_map_preserves_scanned_bytes_and_both_volumes(self):
+  from service import space_tree
+  self.c.executemany('insert into folders values (?,?,?,?,?)',[(str(self.root),'',100,3,1),(str(self.root/'one'),str(self.root),40,1,1),(str(self.root/'two'),str(self.root),30,1,1)])
+  tree=space_tree(self.c,[{'p':str(self.root),'n':100,'files':3},{'p':'Z:\\','n':10,'files':1}],budget=8)
+  self.assertEqual(len(tree),2);self.assertEqual(sum(n['n'] for n in tree[0]['children']),100);self.assertEqual(tree[0]['children'][-1]['n'],30)
+ def test_live_rollup_survives_reconcile_without_double_counting(self):
+  from storage import rollup
+  col=Collector(self.data,[str(self.root)]);directory=str(self.root);p=str(self.root/'small.txt')
+  try:
+   col.c.execute('insert into scan_dirs values (?,?,?,?)',(directory,10,1,'old'));rollup(col.c,directory,10,1)
+   col.adjust_live(p,15,0)
+   self.assertEqual(col.c.execute('select n from folders where p=?',(directory,)).fetchone()[0],25)
+   col.apply_scan(('directory',directory,directory,[],25,1,{}, {'small.txt'},True))
+   self.assertEqual(col.c.execute('select n from folders where p=?',(directory,)).fetchone()[0],25)
+   self.assertEqual(col.c.execute('select n from scan_dirs where p=?',(directory,)).fetchone()[0],25)
+  finally:col.c.rollback();col.c.close()
+ def test_attribution_remains_available_after_session_index_rotates(self):
+  from service import preserve_attribution
+  p=str(self.root/'generated.py');observe(self.c,p,10,1,created=True,ts=time.time()-60);self.c.commit()
+  evidence={'agent':'Codex','confidence':'tool-evidence','session':'old-session','jsonl':'session.jsonl','time':time.time()-60,'reason':'matched tool'}
+  with patch.object(INDEX,'match',return_value=evidence):preserve_attribution(self.data)
+  with patch.object(INDEX,'match',return_value={'agent':'unknown'}):
+   d=state(self.data,{});self.assertEqual(d['events'][0]['attribution']['session'],'old-session')
  def read_status(self):
   try:return json.loads((self.data/'status.json').read_text())
   except (OSError,ValueError):return {'phase':'starting'}

@@ -3,7 +3,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
-import sqlite3
+from sqlite_runtime import sqlite3,safe_wal
 import time
 from rules import classify
 
@@ -13,7 +13,7 @@ def data_dir():
 def connect(data=None):
     data=Path(data or data_dir());data.mkdir(parents=True,exist_ok=True)
     c=sqlite3.connect(data/'index.sqlite3',timeout=15);c.row_factory=sqlite3.Row
-    c.execute('PRAGMA busy_timeout=15000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA synchronous=NORMAL')
+    c.execute('PRAGMA busy_timeout=15000');c.execute('PRAGMA journal_mode='+('WAL' if safe_wal() else 'DELETE'));c.execute('PRAGMA synchronous=FULL')
     return c
 
 def initialize(data=None):

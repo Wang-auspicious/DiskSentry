@@ -1,24 +1,20 @@
-DiskWatch original source: MIT License (LICENSE.txt).
+DiskSentry original source: MIT License (LICENSE.txt).
 
 Watchdog 6.0.0
 Project: https://github.com/gorakhargosh/watchdog
 License: Apache License 2.0, preserved in vendor/LICENSE.
-Source is included in vendor/watchdog, copied from the already installed 6.0.0 distribution.
-Runtime notification flags exclude access-time, security and attribute-only events; the vendored source is unchanged.
+Source included in vendor/watchdog, copied from the installed 6.0.0 distribution.
+Runtime notification flags select file/directory names, sizes and write times.
+The vendored source is unchanged.
 
-WinDirStat 2.9.3, official x64 portable executable
-Project: https://github.com/windirstat/windirstat
-Release: https://github.com/windirstat/windirstat/releases/tag/release/v2.9.3
-Corresponding source: https://github.com/windirstat/windirstat/tree/release/v2.9.3
-Source archive: https://github.com/windirstat/windirstat/archive/refs/tags/release/v2.9.3.zip
-License: GPL v3 or later. Included license: tools/WinDirStat-LICENSE.md.
-WinDirStat is a separate, unmodified program, optionally opened from DiskWatch.
-Official WinDirStat.zip SHA-256 verified against the GitHub release asset digest:
-c980fee14389eb3a160415b0a07361900f3630f232501884863fec40f369a4a4
-The included x64 executable's Authenticode signature was valid at installation,
-signed by Open Source Developer Bryan Berns.
+SQLite 3.53.1 (Windows x64 DLL)
+Project: https://www.sqlite.org/
+Public domain. See runtime/LICENSE.txt for provenance and checksum.
+Loaded only inside this application; does not replace system or Python DLLs.
 
-Other evaluated projects
-Delta: https://github.com/chuunibian/delta — MIT; manual snapshot scans, no autonomous background monitoring.
-DiskTracker: https://github.com/pratham15541/disktracker — MIT; daemon/CLI available, no current graphical desktop client.
-DiskMap: https://github.com/aldo-mcs/DiskMap — repository license states proprietary / all rights reserved; not reused.
+psutil (installed dependency; not bundled)
+Project: https://github.com/giampaolo/psutil
+License: BSD 3-Clause. See the installed package's license and project source.
+
+WinDirStat and other evaluated applications are not shipped or invoked by
+this version. No cleanup executable or deletion script is included.

@@ -7,7 +7,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import sqlite3
+from sqlite_runtime import sqlite3
 import subprocess
 import sys
 import time
