@@ -7,6 +7,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Install psutil first: python -m pip install -r
 $oldStop=Join-Path $env:LOCALAPPDATA 'DiskWatch\stop.request'
 if (Test-Path -LiteralPath (Split-Path $oldStop)) { New-Item -ItemType File -Force -Path $oldStop | Out-Null }
 & $pythonExe (Join-Path $appDir 'launcher.py') --install --start
+if ($LASTEXITCODE -ne 0) { throw 'DiskSentry startup failed; check the local collector log.' }
 $shellObject=New-Object -ComObject WScript.Shell
 $desktopDir=[Environment]::GetFolderPath('Desktop')
 foreach($shortcutPath in @((Join-Path $desktopDir 'DiskSentry.lnk'),(Join-Path $appDir 'DiskSentry.lnk'),(Join-Path $desktopDir '磁盘哨兵.lnk'))) {

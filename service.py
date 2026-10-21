@@ -40,7 +40,9 @@ def state(data,query):
     with closing(connect(data)) as c:
         status=meta(c,'status',{});healthy=time.time()-status.get('heartbeat',0)<5 and status.get('phase')!='stopped'
         rows,total=query_events(c,begin,end,query.get('q',''),query.get('drive',''),query.get('kind',''),min(500,max(1,int(query.get('limit',150)))),max(0,int(query.get('offset',0))))
-        sums=c.execute('SELECT count(*) count,coalesce(sum(CASE WHEN delta>0 THEN delta ELSE 0 END),0) added,coalesce(sum(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) freed,coalesce(sum(delta),0) net,sum(CASE WHEN delta IS NULL THEN 1 ELSE 0 END) unknown FROM events WHERE ts>=? AND ts<?',(begin,end)).fetchone()
+        summary_where='ts>=? AND ts<?';summary_args=[begin,end]
+        if query.get('drive'):summary_where+=' AND substr(p,1,?)=? COLLATE NOCASE';summary_args.extend([len(query['drive']),query['drive']])
+        sums=c.execute('SELECT count(*) count,coalesce(sum(CASE WHEN delta>0 THEN delta ELSE 0 END),0) added,coalesce(sum(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) freed,coalesce(sum(delta),0) net,sum(CASE WHEN delta IS NULL THEN 1 ELSE 0 END) unknown FROM events WHERE '+summary_where,summary_args).fetchone()
         disks=[]
         roots=[r[0] for r in c.execute('SELECT DISTINCT root FROM volumes')]
         for root in roots:
@@ -64,7 +66,7 @@ def state(data,query):
         latest=c.execute('SELECT * FROM memory ORDER BY ts DESC LIMIT 1').fetchone()
         ai=public_config();ai['enabled']=meta(c,'ai_enabled',True);ai['jobs']={r[0]:r[1] for r in c.execute('SELECT status,count(*) FROM ai_jobs GROUP BY status')}
         storage_size=sum(p.stat().st_size for p in Path(data).glob('index.sqlite3*'))
-        return dict(version='2.0',now=time.time(),range=dict(start=begin,end=end),recordingSince=meta(c,'recording_since'),status=status,healthy=healthy,summary=dict(sums),disks=disks,events=rows,totalEvents=total,largest=largest,folders=folders,candidates=candidates,memory=dict(history=mem,current=dict(ts=latest['ts'],used=latest['used'],total=latest['total'],processes=json.loads(latest['processes'])) if latest else None),ai=ai,indexBytes=storage_size)
+        return dict(version='2.0',now=time.time(),range=dict(start=begin,end=end),recordingSince=meta(c,'recording_since'),legacyWarning=meta(c,'legacy_import_error'),historyGap=meta(c,'history_gap'),status=status,healthy=healthy,summary=dict(sums),disks=disks,events=rows,totalEvents=total,largest=largest,folders=folders,candidates=candidates,memory=dict(history=mem,current=dict(ts=latest['ts'],used=latest['used'],total=latest['total'],processes=json.loads(latest['processes'])) if latest else None),ai=ai,indexBytes=storage_size)
 
 def detail(data,path,event_id=None):
     with closing(connect(data)) as c:

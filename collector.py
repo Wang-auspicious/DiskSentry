@@ -51,9 +51,10 @@ def processes():
 class Collector:
     def __init__(self,data=None,watch_roots=None):
         self.data=Path(data or data_dir());initialize(self.data);self.c=connect(self.data)
-        self.stop=threading.Event();self.pending=Pending(self.data);self.observers={};self.scan_messages=queue.Queue(12)
+        self.stop=threading.Event();self.pending=Pending(self.data);self.observers={};self.scan_messages=queue.Queue(48)
         self.roots=watch_roots or roots();self.last_resources=0;self.last_folders=0;self.revision=0;self.thread=None
         self.state=dict(pid=os.getpid(),phase='starting',roots=self.roots,heartbeat=time.time(),indexed=meta(self.c,'indexed',0),scanned=0,skipped=0,errors=[],coverage_complete=all(meta(self.c,'baseline:'+r,False) for r in self.roots))
+        self.scan_acks=queue.SimpleQueue();self.ack_pending=[]
 
     def resource_sample(self,now=None):
         now=now or time.time()
@@ -70,11 +71,15 @@ class Collector:
                 if not meta(c,'baseline:'+root,False) and not c.execute('SELECT 1 FROM scan_queue WHERE root=?',(root,)).fetchone():
                     c.execute('INSERT OR IGNORE INTO scan_queue VALUES (?,?,?)',(root,root,100))
             c.commit()
+            inflight=set()
             while not self.stop.is_set():
-                task=c.execute('SELECT * FROM scan_queue ORDER BY priority DESC LIMIT 1').fetchone()
-                if not task:break
+                while not self.scan_acks.empty():inflight.discard(self.scan_acks.get_nowait())
+                tasks=c.execute('SELECT * FROM scan_queue ORDER BY priority DESC LIMIT 256').fetchall()
+                if not tasks:break
+                task=next((t for t in tasks if t['p'] not in inflight),None)
+                if task is None:self.stop.wait(.02);continue
                 directory=task['p'];root=task['root'];baseline=not meta(c,'baseline:'+root,False)
-                if psutil.disk_usage(self.data).free<5_000_000_000:
+                if psutil.disk_usage(str(self.data)).free<5_000_000_000:
                     self.state['phase']='index_paused_low_space';self.state['errors']=['索引所在磁盘不足 5 GB；已暂停全盘索引，保留实时监听。'];self.stop.wait(15);continue
                 rows=[];children=[];candidates={};total=0;count=0;observed_names=set()
                 try:
@@ -99,16 +104,16 @@ class Collector:
                             except OSError:self.state['skipped']+=1
                     if rows:self.put(('files',rows,baseline))
                     self.put(('directory',directory,root,children,total,count,candidates,observed_names,baseline))
-                    # Writer acknowledges by deleting queue row. Keeps current directory replayable on crash.
-                    while not self.stop.is_set() and c.execute('SELECT 1 FROM scan_queue WHERE p=?',(directory,)).fetchone():time.sleep(.05)
+                    inflight.add(directory)
                 except OSError as e:
                     self.state['skipped']+=1
                     if len(self.state['errors'])<30:self.state['errors'].append(str(e))
                     self.put(('skip',directory))
+                    inflight.add(directory)
                     time.sleep(.02)
             self.put(('scan_done',))
         except Exception:
-            logging.exception('Scanner stopped');self.put(('scan_error',))
+            logging.exception('Scanner stopped');self.put(('scan_error',));self.stop.wait(15)
         finally:c.close()
 
     def put(self,item):
@@ -144,9 +149,10 @@ class Collector:
             self.c.executemany('INSERT OR REPLACE INTO candidate_parts VALUES (?,?,?,?,?,?)',[(directory,b,v[0],v[1],v[2]['risk'],v[2]['reason']) for b,v in candidates.items()])
             self.c.executemany('INSERT OR IGNORE INTO scan_queue VALUES (?,?,?)',children)
             self.c.execute('DELETE FROM scan_queue WHERE p=?',(directory,))
+            self.ack_pending.append(directory)
             if not self.c.execute('SELECT 1 FROM scan_queue WHERE root=?',(root,)).fetchone():setmeta(self.c,'baseline:'+root,True)
             self.state['scanning_path']=directory
-        elif msg[0]=='skip':self.c.execute('DELETE FROM scan_queue WHERE p=?',(msg[1],))
+        elif msg[0]=='skip':self.c.execute('DELETE FROM scan_queue WHERE p=?',(msg[1],));self.ack_pending.append(msg[1])
         elif msg[0]=='scan_done':
             self.state['phase']='watching';self.state['last_scan']=time.time();self.state['coverage_complete']=True
             setmeta(self.c,'last_scan',time.time())
@@ -186,7 +192,7 @@ class Collector:
             while not self.stop.is_set() and not (self.data/'stop.request').exists():
                 started=time.monotonic();self.live()
                 # Bound scan work so event ingestion/resource sampling cannot starve.
-                for _ in range(8):
+                for _ in range(256):
                     try:self.apply_scan(self.scan_messages.get_nowait())
                     except queue.Empty:break
                     if time.monotonic()-started>.25:break
@@ -199,6 +205,8 @@ class Collector:
                 if not (self.thread and self.thread.is_alive()) and self.c.execute('SELECT 1 FROM scan_queue').fetchone():self.launch_scan()
                 self.state.update(heartbeat=now,watchers={r:o.is_alive() and all(e.is_alive() for e in o.emitters) for r,o in self.observers.items()},overflow=self.pending.overflow,revision=self.revision)
                 self.revision+=1;setmeta(self.c,'status',self.state);self.c.commit();atomic(self.data/'status.json',self.state)
+                for p in self.ack_pending:self.scan_acks.put(p)
+                self.ack_pending=[]
                 # Healthy emitter reconnection; reconciliation is explicitly requested after a gap.
                 for root,ob in list(self.observers.items()):
                     if not self.state['watchers'][root]:ob.stop();ob.join(1);new=Observer();new.schedule(self.pending,root,recursive=True);new.start();self.observers[root]=new;next_scan=0

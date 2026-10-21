@@ -42,17 +42,20 @@ def read_session(path,agent,max_bytes=262144):
                     except ValueError:args={'patch':args[:30000]}
                 if not isinstance(args,dict):continue
                 paths=[args.get(k) for k in ('path','file_path','filePath','target_file') if isinstance(args.get(k),str)]
-                if 'apply_patch' in tool:
-                    for value in args.values():
-                        if isinstance(value,str):paths+=re.findall(r'\*\*\* (?:Add|Update|Delete) File: (.+)',value)
+                patch_write=False
+                for value in args.values():
+                    if isinstance(value,str) and '*** ' in value:
+                        normalized_patch=value.replace('\\n','\n').replace('\\\\','\\')
+                        targets=re.findall(r'\*\*\* (?:Add|Update|Delete) File: ([^\n\r\"]+)',normalized_patch)
+                        paths+=targets;patch_write=patch_write or bool(targets)
                 for target in paths:
                     if not os.path.isabs(target) and cwd:target=os.path.join(cwd,target)
-                    records.append({'path':os.path.normcase(os.path.abspath(target)),'ts':ts,'tool':tool,'write':any(t in tool.lower() for t in WRITE_TOOLS)})
+                    records.append({'path':os.path.normcase(os.path.abspath(target)),'ts':ts,'tool':tool,'write':patch_write or any(t in tool.lower() for t in WRITE_TOOLS)})
         return {'agent':agent,'session':str(session),'jsonl':str(path),'cwd':cwd,'records':records[-200:]}
     except OSError:return None
 
 class SessionIndex:
-    def __init__(self):self.lock=threading.Lock();self.sessions={};self.last_refresh=0
+    def __init__(self):self.lock=threading.Lock();self.sessions={};self.last_refresh=0;self.paths={}
     def refresh(self):
         home=Path.home();roots=[(home/'.codex/sessions','Codex'),(home/'.claude/projects','Claude Code'),(home/'.pi/agent/sessions','Pi Agent'),(home/'.local/share/opencode/storage/session','OpenCode')]
         candidates=[]
@@ -71,18 +74,25 @@ class SessionIndex:
                 old=self.sessions.get(str(p))
                 if not old or old[0]!=m:self.sessions[str(p)]=(m,read_session(p,agent))
             self.last_refresh=time.time()
+            self._reindex()
+    def _reindex(self):
+        self.paths={}
+        for modified,s in self.sessions.values():
+            if s:
+                for r in s['records']:self.paths.setdefault(r['path'],[]).append((s,r))
     def match(self,path,when=None):
         normalized=os.path.normcase(os.path.abspath(path));when=when or time.time();best=None
         with self.lock:
+            if not self.paths:self._reindex()
             for modified,s in self.sessions.values():
                 if not s:continue
                 if normalized==os.path.normcase(os.path.abspath(s['jsonl'])):
                     return dict(agent=s['agent'],confidence='direct',reason='此文件本身是 Agent 会话日志',session=s['session'],jsonl=s['jsonl'],time=modified)
-                for r in s['records']:
-                    if r['path']==normalized and abs(r['ts']-when)<=300:
-                        candidate=dict(agent=s['agent'],confidence='tool-evidence' if r['write'] else 'reference',reason='会话中存在写入工具调用（与文件事件时间相关）' if r['write'] else '会话提及文件，不能证明写入者',session=s['session'],jsonl=s['jsonl'],tool=r['tool'],time=r['ts'])
-                        if r['write']:return candidate
-                        best=candidate
+            for s,r in self.paths.get(normalized,[]):
+                if abs(r['ts']-when)<=300:
+                    candidate=dict(agent=s['agent'],confidence='tool-evidence' if r['write'] else 'reference',reason='会话中存在写入工具调用（与文件事件时间相关）' if r['write'] else '会话提及文件，不能证明写入者',session=s['session'],jsonl=s['jsonl'],tool=r['tool'],time=r['ts'])
+                    if r['write']:return candidate
+                    best=candidate
         if best:return best
         p=normalized.replace('\\','/')
         for marker,agent in [('/.codex/','Codex'),('/.pi/','Pi Agent'),('/.claude/','Claude Code'),('/opencode/','OpenCode')]:

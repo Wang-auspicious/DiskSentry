@@ -56,8 +56,11 @@ def migrate_history(data):
             for r in source.execute('SELECT * FROM changes'):
                 c.execute('INSERT INTO events(ts,p,kind,b,n,delta,source,evidence) VALUES (?,?,?,?,?,?,?,?)',(r['last_at'],r['display'],r['kind'],r['before_size'],r['after_size'],r['after_size']-r['before_size'],'legacy-large-files',json.dumps({'agent':'未知','confidence':'legacy','reason':'旧版每日大文件汇总，非逐次事件'})))
             # Old large-file inventory seeds display only; never label it as a fresh scan.
-            for r in source.execute('SELECT * FROM files WHERE present=1'):
-                c.execute('INSERT OR IGNORE INTO files VALUES (?,?,?,?,?)',(r['display'],r['size'],r['mtime'],r['allocated'],r['last_seen']))
+            try:
+                for r in source.execute('SELECT * FROM files WHERE present=1'):
+                    c.execute('INSERT OR IGNORE INTO files VALUES (?,?,?,?,?)',(r['display'],r['size'],r['mtime'],r['allocated'],r['last_seen']))
+            except sqlite3.DatabaseError:
+                setmeta(c,'legacy_import_error','旧版文件索引报告损坏；原库保持不动，可读的旧事件已保留，新版重新建立文件索引。')
         setmeta(c,'legacy_imported',True);setmeta(c,'history_gap',{'from':'2026-10-15','until':time.time(),'reason':'旧监控进程已退出，仅遗留少量历史。v2 从本次启用开始连续采样。'});c.commit()
 
 def daemon(data):
